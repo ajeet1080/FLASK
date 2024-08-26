@@ -2,9 +2,22 @@ from flask import Flask, request, jsonify, send_from_directory
 # from flask_marshmallow import Marshmallow
 from flask_swagger_ui import get_swaggerui_blueprint
 from flask_cors import CORS
-from models import initialize_db, EMD, emdSchema,  DRUG, drugSchema, LAB, labSchema, Radiology, radSchema , END, endSchema, Urology , uroSchema
 import openai
-from sqlalchemy import func
+from cryptography.hazmat.primitives.serialization import pkcs12
+import json
+from azure.cosmos import CosmosClient, PartitionKey
+import uuid
+import os
+from azure.ai.textanalytics import TextAnalyticsClient
+from azure.core.credentials import AzureKeyCredential
+from promptflow.core import AzureOpenAIModelConfiguration
+from promptflow.client import load_flow
+from promptflow.evals.evaluators import RelevanceEvaluator, GroundednessEvaluator, CoherenceEvaluator
+import pymongo
+import pytz
+import time
+import base64
+
 
 import os
 
@@ -12,16 +25,30 @@ import os
 app = Flask(__name__)
 
 # Initialize the database with the app instance
-initialize_db(app)
+
 
 CORS(app)
 app.app_context().push()
+
+# Azure Text Analytics setup
+key = "603cdb17c06845adbebf09158a7ef2ab"
+endpoint = "https://text-analytics-demo1.cognitiveservices.azure.com/"
+text_analytics_client = TextAnalyticsClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
 openai.api_type = "azure"
 openai.api_version = "2023-05-15"
 # Your Azure OpenAI resource's endpoint value.
 openai.api_base = "https://shplayground2.openai.azure.com/"
 openai.api_key = "fefc20d1c3ee4046b446c239f96e4fc4"
+
+COSMOS_CONNECTION_STRING = "mongodb://notebuddy-02:wQvnE4bXrOsplHFVryyeN6MRDwhNhISn7lG5R6jmaKBIYaxEebzgO5AT0FOvch4HlOp6cXYl9MBWACDbJPcHlA==@notebuddy-02.mongo.cosmos.azure.com:10255/?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000&appName=@notebuddy-02@"
+client = pymongo.MongoClient(COSMOS_CONNECTION_STRING)
+
+TEXT_ANALYTICS_ENDPOINT = "https://text-analytics-demo1.cognitiveservices.azure.com/"
+TEXT_ANALYTICS_API_KEY = "603cdb17c06845adbebf09158a7ef2ab"
+
+azure_credential = AzureKeyCredential(TEXT_ANALYTICS_API_KEY)
+text_analytics_client = TextAnalyticsClient(endpoint=TEXT_ANALYTICS_ENDPOINT, credential=azure_credential)
 
 
 @app.route('/static/<path:path>')
@@ -61,331 +88,707 @@ API_KEYS = {
 }
 
 
-# Init Schema
-emd_schema = emdSchema()
-emds_schema = emdSchema(many=True)
+# SaveRoute
 
-end_schema = endSchema()
-ends_schema = endSchema(many=True)
+@app.route('/getMaxCode', methods=['GET'])
+def retrieve_highest_code():
+    pipeline = [
+        {
+            '$project': {
+                'code': {'$toInt': '$code'}  # Cast code to integer
+            }
+        },
+        {
+            '$group': {
+                '_id': None,
+                'code': {'$max': '$code'}
+            }
+        }
+    ]
 
-uro_schema = uroSchema()
-uros_schema = uroSchema(many=True)
-
-lab_schema = labSchema()
-labs_schema = labSchema(many=True)
-
-drug_schema = drugSchema()
-drugs_schema = drugSchema(many=True)
-
-rad_schema = radSchema()
-rads_schema = radSchema(many=True)
-
-# Create route to get all records with optional  query parameter for any Patient_ID, Case_No, Institution_Code , Document_Name,Document_Item_Name_Long and Left_Label . Also create api_key for authentication
-
-
-@app.route('/emd', methods=['GET'])
-def get_emds():
-    api_key = request.headers.get('x-api-key')
-   # fetch authentication api_key value from request as api_key
-    Case_No = request.args.get('Case_No')
-    Patient_ID = request.args.get('Patient_ID')
-    Institution_Code = request.args.get('Institution_Code')
-    Document_Name = request.args.get('Document_Name')
-    Document_Item_Name_Long = request.args.get('Document_Item_Name_Long')
-    Left_Label = request.args.get('Left_Label')
-    if api_key is None:
-        return jsonify(error="Missing API key"), 400
-
-    # Check if the provided API key is valid
-    if api_key not in API_KEYS.values():
-        return jsonify(error="Invalid API key"), 403
-    else:
-        if Case_No is None:
-            all_emds = EMD.query.order_by(
-                EMD.Authored_Date.desc(), EMD.Document_Item_Description).all()
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+        result = list(collection.aggregate(pipeline))
+        if result:
+            return jsonify({"code": result[0]['code']})
         else:
-            all_emds = EMD.query.filter_by(Case_No=Case_No).order_by(
-                EMD.Authored_Date.desc(), EMD.Document_Item_Description)
-        if Patient_ID is not None:
-            all_emds = all_emds.filter_by(Patient_ID=Patient_ID).order_by(
-                EMD.Authored_Date.desc(), EMD.Document_Item_Description)
-        if Institution_Code is not None:
-            all_emds = all_emds.filter_by(Institution_Code=Institution_Code).order_by(
-                EMD.Authored_Date.desc(), EMD.Document_Item_Description)
-        if Document_Name is not None:
-            all_emds = all_emds.filter_by(Document_Name=Document_Name).order_by(
-                EMD.Authored_Date.desc(), EMD.Document_Item_Description)
-        if Document_Item_Name_Long is not None:
-            all_emds = all_emds.filter_by(
-                Document_Item_Name_Long=Document_Item_Name_Long).order_by(EMD.Authored_Date.desc(), EMD.Document_Item_Description)
-        if Left_Label is not None:
-            all_emds = all_emds.filter_by(Left_Label=Left_Label).order_by(
-                EMD.Authored_Date.desc(), EMD.Document_Item_Description)
-        result = emds_schema.dump(all_emds)
-        return jsonify(result)
+            return jsonify({"code":0})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
     
+@app.route('/save', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def save_to_mongodb(*args, **kwargs):
+    data = request.json
+    # summary = data.get('summary')
+    # transcript = data.get('transcript')
+    # user_id = request.headers['userId']
+    item = data['item']
 
-@app.route('/end', methods=['GET'])
-def get_ends():
-    api_key = request.headers.get('x-api-key')
-   # fetch authentication api_key value from request as api_key
-    Case_No = request.args.get('Case_No')
-    Patient_ID = request.args.get('Patient_ID')
-    Institution_Code = request.args.get('Institution_Code')
-    Document_Name = request.args.get('Document_Name')
-    Document_Item_Name_Long = request.args.get('Document_Item_Name_Long')
-    Left_Label = request.args.get('Left_Label')
-    if api_key is None:
-        return jsonify(error="Missing API key"), 400
+    try:
+        new_id = str(uuid.uuid4())
 
-    # Check if the provided API key is valid
-    if api_key not in API_KEYS.values():
-        return jsonify(error="Invalid API key"), 403
-    else:
-        if Case_No is None:
-            all_ends = END.query.order_by(
-                END.Authored_Date.desc(), END.Document_Item_Description).all()
+        # Decode
+        decoded_transcript = base64.b64decode(item['transcript']).decode('utf-8')
+        decoded_summary = base64.b64decode(item['summary']).decode('utf-8')
+        decoded_formattedtranscript = base64.b64decode(item['formattedtranscript']).decode('utf-8')
+        decoded_prompt = base64.b64decode(item['prompt']).decode('utf-8')
+        decoded_prompt_title = base64.b64decode(item['promptTitle']).decode('utf-8')
+
+        # Save the data
+        # 29072024 - Updated below to include more fields.
+        document = {
+            "id": new_id,
+            "user": item['user'],
+            "patientID": item['patientID'],
+            "dataCategory": item['dataCategory'],
+            "summary": decoded_summary,
+            "transcript": decoded_transcript,
+            "formattedtranscript": decoded_formattedtranscript,
+            "updatedSummary": "",
+            "promptTitle": decoded_prompt_title,
+            "prompt": decoded_prompt,
+            "code": item['id_cd'],
+            "accuracy": "",
+            "completeness": "",
+            "coherence": "",
+            "lexiconPrecision": "",
+            "feedback": "",
+            "_ts": int(time.time())  # Current Unix timestamp
+        }
+
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+        collection.insert_one(document)
+
+        # Return the new id
+        return jsonify({"success": True, "id": new_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/saveNotebuddyPrompt', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def save_notebuddy_prompt(*args, **kwargs):
+    data = request.json
+    # summary = data.get('summary')
+    # transcript = data.get('transcript')
+    # user_id = request.headers['userId']
+    item = data['item']
+
+    # Decode
+    decoded_prompttitle = base64.b64decode(item['promptTitle']).decode('utf-8')
+    decoded_prompt = base64.b64decode(item['prompt']).decode('utf-8')
+    
+    #check if there is a prompt in db with same title
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_prompts"]
+        document = collection.find_one({"promptTitle": decoded_prompttitle})
+        if document:
+            return jsonify({"error": "Prompt with same title already exists"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
+    pipeline = [
+            {
+                '$project': {
+                    'id': {'$toInt': '$id'}  # Cast code to integer
+                }
+            },
+            {
+                '$group': {
+                    '_id': None,
+                    'id': {'$max': '$id'}
+                }
+            }
+        ]
+
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_prompts"]
+        result = list(collection.aggregate(pipeline))
+
+        if len(result) == 0:
+            highest = 0
         else:
-            all_ends = END.query.filter_by(Case_No=Case_No).order_by(
-                END.Authored_Date.desc(), END.Document_Item_Description)
-        if Patient_ID is not None:
-            all_ends = all_ends.filter_by(Patient_ID=Patient_ID).order_by(
-                END.Authored_Date.desc(), END.Document_Item_Description)
-        if Institution_Code is not None:
-            all_ends = all_ends.filter_by(Institution_Code=Institution_Code).order_by(
-                END.Authored_Date.desc(), END.Document_Item_Description)
-        if Document_Name is not None:
-            all_ends = all_ends.filter_by(Document_Name=Document_Name).order_by(
-                END.Authored_Date.desc(), END.Document_Item_Description)
-        if Document_Item_Name_Long is not None:
-            all_ends = all_ends.filter_by(
-                Document_Item_Name_Long=Document_Item_Name_Long).order_by(END.Authored_Date.desc(), END.Document_Item_Description)
-        if Left_Label is not None:
-            all_ends = all_ends.filter_by(Left_Label=Left_Label).order_by(
-                END.Authored_Date.desc(), END.Document_Item_Description)
-        result = ends_schema.dump(all_ends)
-        return jsonify(result) 
+            highest = result[0]['id']
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/uro', methods=['GET'])
-def get_uros():
-    api_key = request.headers.get('x-api-key')
-   # fetch authentication api_key value from request as api_key
-    Case_No = request.args.get('Case_No')
-    Patient_ID = request.args.get('Patient_ID')
-    Institution_Code = request.args.get('Institution_Code')
-    Document_Name = request.args.get('Document_Name')
-    Document_Item_Name_Long = request.args.get('Document_Item_Name_Long')
-    Left_Label = request.args.get('Left_Label')
-    if api_key is None:
-        return jsonify(error="Missing API key"), 400
+    try:
+        # Save the data
+        document = {
+            "id": highest+1,
+            "user": item['user'],
+            "prompt": decoded_prompt,
+            "promptTitle": decoded_prompttitle,
+            "_ts": int(time.time())
+        }
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_prompts"]
+        collection.insert_one(document)
 
-    # Check if the provided API key is valid
-    if api_key not in API_KEYS.values():
-        return jsonify(error="Invalid API key"), 403
-    else:
-        if Case_No is None:
-            all_uros = Urology.query.order_by(
-                Urology.Authored_Date.desc(), Urology.Document_Item_Description).all()
+        # Return the new id
+        return jsonify({"success": True, "id": highest+1})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+#Retrieve Route
+
+@app.route('/getAllPromptsNotebuddy', methods=['GET'])
+# @validate_hmac
+# @validate_client_cert
+def get_all_prompts_notebuddy(*args, **kwargs):
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_prompts"]
+        documents = list(collection.find())
+
+        if documents:
+            for doc in documents:
+                doc['_id'] = str(doc['_id'])
+
+            return jsonify(documents)
         else:
-            all_uros = Urology.query.filter_by(Case_No=Case_No).order_by(
-                Urology.Authored_Date.desc(), Urology.Document_Item_Description)
-        if Patient_ID is not None:
-            all_uros = all_uros.filter_by(Patient_ID=Patient_ID).order_by(
-                Urology.Authored_Date.desc(), Urology.Document_Item_Description)
-        if Institution_Code is not None:
-            all_uros = all_uros.filter_by(Institution_Code=Institution_Code).order_by(
-                Urology.Authored_Date.desc(), Urology.Document_Item_Description)
-        if Document_Name is not None:
-            all_uros = all_uros.filter_by(Document_Name=Document_Name).order_by(
-                Urology.Authored_Date.desc(), Urology.Document_Item_Description)
-        if Document_Item_Name_Long is not None:
-            all_uros = all_uros.filter_by(
-                Document_Item_Name_Long=Document_Item_Name_Long).order_by(Urology.Authored_Date.desc(), Urology.Document_Item_Description)
-        if Left_Label is not None:
-            all_uros = all_uros.filter_by(Left_Label=Left_Label).order_by(
-                Urology.Authored_Date.desc(), Urology.Document_Item_Description)
-        result = uros_schema.dump(all_uros)
-        return jsonify(result)         
+            return jsonify([]), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/getAllInstNotebuddy', methods=['GET'])
+# @validate_hmac
+# @validate_client_cert
+def get_all_institutions_notebuddy(*args, **kwargs):
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_institutions"]
+        documents = list(collection.find())
 
+        if documents:
+            for doc in documents:
+                doc['_id'] = str(doc['_id'])
 
-@app.route('/lab', methods=['GET'])
-def get_lab():
-    api_key = request.headers.get('x-api-key')
-   # fetch authentication api_key value from request as api_key
-    Case_No = request.args.get('Case_No')
-    Patient_ID = request.args.get('Patient_ID')
-    Institution_Code = request.args.get('Institution_Code')
-    Lab_Test_Code = request.args.get('Lab_Test_Code')
-    Lab_Resulted_Order_Test_Code = request.args.get(
-        'Lab_Resulted_Order_Test_Code')
-    Units_of_Measurement = request.args.get('Units_of_Measurement')
-    if api_key is None:
-        return jsonify(error="Missing API key"), 400
-
-    # Check if the provided API key is valid
-    if api_key not in API_KEYS.values():
-        return jsonify(error="Invalid API key"), 403
-    else:
-        if Case_No is None:
-            all_lab = LAB.query.order_by(
-                LAB.Reported_Date.desc(), LAB.Lab_Resulted_Order_Test_Description).all()
+            return jsonify(documents)
         else:
-            all_lab = LAB.query.filter_by(Case_No=Case_No).order_by(
-                LAB.Reported_Date.desc(), LAB.Lab_Resulted_Order_Test_Description)
-        if Patient_ID is not None:
-            all_lab = all_lab.filter_by(Patient_ID=Patient_ID).order_by(
-                LAB.Reported_Date.desc(), LAB.Lab_Resulted_Order_Test_Description)
-        if Institution_Code is not None:
-            all_lab = all_lab.filter_by(Institution_Code=Institution_Code).order_by(
-                LAB.Reported_Date.desc(), LAB.Lab_Resulted_Order_Test_Description)
-        if Lab_Test_Code is not None:
-            all_lab = all_lab.filter_by(Lab_Test_Code=Lab_Test_Code).order_by(
-                LAB.Reported_Date.desc(), LAB.Lab_Resulted_Order_Test_Description)
-        if Lab_Resulted_Order_Test_Code is not None:
-            all_lab = all_lab.filter_by(
-                Lab_Resulted_Order_Test_Code=Lab_Resulted_Order_Test_Code).order_by(LAB.Reported_Date.desc(), LAB.Lab_Resulted_Order_Test_Description)
-        if Units_of_Measurement is not None:
-            all_lab = all_lab.filter_by(
-                Units_of_Measurement=Units_of_Measurement).order_by(LAB.Reported_Date.desc(), LAB.Lab_Resulted_Order_Test_Description)
-        result = labs_schema.dump(all_lab)
-        return jsonify(result)
+            return jsonify([]), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500  
 
+@app.route('/getAllDeptNotebuddy', methods=['GET'])
+# @validate_hmac
+# @validate_client_cert
+def get_all_dept_notebuddy(*args, **kwargs):
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_departments"]
+        documents = list(collection.find())
 
-@app.route('/drugs', methods=['GET'])
-def get_drugs():
-    api_key = request.headers.get('x-api-key')
-   # fetch authentication api_key value from request as api_key
-    Case_No = request.args.get('Case_No')
-    Patient_ID = request.args.get('Patient_ID')
-    Institution_Code = request.args.get('Institution_Code')
-    Drug_Name = request.args.get('Drug_Name')
-    Generic_Drug_Name = request.args.get(
-        'Generic_Drug_Name')
-    Discharge_Indicator = request.args.get('Discharge_Indicator')
-    if api_key is None:
-        return jsonify(error="Missing API key"), 400
+        if documents:
+            for doc in documents:
+                doc['_id'] = str(doc['_id'])
 
-    # Check if the provided API key is valid
-    if api_key not in API_KEYS.values():
-        return jsonify(error="Invalid API key"), 403
-    else:
-        if Case_No is None:
-            all_drug = DRUG.query.order_by(
-                DRUG.Drug_Dispensed_Date_To.desc(), DRUG.Generic_Drug_Name).all()
+            return jsonify(documents)
         else:
-            all_drug = DRUG.query.filter_by(Case_No=Case_No).order_by(
-                DRUG.Drug_Dispensed_Date_To.desc(), DRUG.Generic_Drug_Name)
-        if Patient_ID is not None:
-            all_drug = all_drug.filter_by(Patient_ID=Patient_ID).order_by(
-                DRUG.Drug_Dispensed_Date_To.desc(), DRUG.Generic_Drug_Name)
-        if Institution_Code is not None:
-            all_drug = all_drug.filter_by(Institution_Code=Institution_Code).order_by(
-                DRUG.Drug_Dispensed_Date_To.desc(), DRUG.Generic_Drug_Name)
-        if Drug_Name is not None:
-            all_drug = all_drug.filter_by(Drug_Name=Drug_Name).order_by(
-                DRUG.Drug_Dispensed_Date_To.desc(), DRUG.Generic_Drug_Name)
-        if Generic_Drug_Name is not None:
-            all_drug = all_drug.filter_by(
-                Generic_Drug_Name=Generic_Drug_Name).order_by(DRUG.Drug_Dispensed_Date_To.desc(), DRUG.Generic_Drug_Name)
-        if Discharge_Indicator is not None:
-            all_drug = all_drug.filter_by(
-                Discharge_Indicator=Discharge_Indicator).order_by(DRUG.Drug_Dispensed_Date_To.desc(), DRUG.Generic_Drug_Name)
-        result = drugs_schema.dump(all_drug)
-        return jsonify(result)
+            return jsonify([]), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500      
+
+@app.route('/getUserSession', methods=['POST'])
+def get_user_session():
+    data = request.json
+    #unique_code = data['item']['id']
+    #aad_user = data['item']['user']
+    unique_code = data['id']
+    aad_user = data['user']
+
+    # Calculate the timestamp for 30 days ago
+    #thirty_days_ago_timestamp = int(time.time()) - 30 * 24 * 60 * 60
 
 
-@app.route('/radiology', methods=['GET'])
-def get_radiology():
-    api_key = request.headers.get('x-api-key')
-   # fetch authentication api_key value from request as api_key
-    Case_No = request.args.get('Case_No')
-    Institution_Code = request.args.get('Institution_Code')
-    Order_Name = request.args.get('Order_Name')
-    Procedure_Name = request.args.get(
-        'Procedure_Name')
-    if api_key is None:
-        return jsonify(error="Missing API key"), 400
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+ 
+        # Construct the query
+        query = {
+            "id": unique_code,
+            "user": aad_user,
+        }
+ 
+        # Execute the query
+        items = list(collection.find(query))        
 
-    # Check if the provided API key is valid
-    if api_key not in API_KEYS.values():
-        return jsonify(error="Invalid API key"), 403
-    else:
-        if Case_No is None:
-            all_rads = Radiology.query.order_by(
-                Radiology.Exam_Start_Date.desc(), Radiology.Order_Name).all()
+        for item in items:
+            item['_id'] = str(item['_id'])
+ 
+        if items:
+            return jsonify(items), 200
         else:
-            all_rads = Radiology.query.filter_by(Case_No=Case_No).order_by(
-                Radiology.Exam_Start_Date.desc(), Radiology.Order_Name)
-        if Institution_Code is not None:
-            all_rads = all_rads.filter_by(Institution_Code=Institution_Code).order_by(
-                Radiology.Exam_Start_Date.desc(), Radiology.Order_Name)
-        if Order_Name is not None:
-            all_rads = all_rads.filter_by(Order_Name=Order_Name).order_by(
-                Radiology.Exam_Start_Date.desc(), Radiology.Order_Name)
-        if Procedure_Name is not None:
-            all_rads = all_rads.filter_by(
-                Procedure_Name=Procedure_Name).order_by(Radiology.Exam_Start_Date.desc(), Radiology.Order_Name)
-        result = rads_schema.dump(all_rads)
-        return jsonify(result)
-
-# Create Post route called /generate to call azure open ai api to ask question and get answer. Use deployment shhqllm01
+            return jsonify({"error": "Data not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/generate', methods=['POST'])
-def get_openai_response():
-    user_message = request.json.get('prompt')
-    response = openai.ChatCompletion.create(
-        # The deployment name you chose when you deployed the GPT-35-Turbo or GPT-4 model.
-        engine="432",
-        messages=[
-            {"role": "system",
-                "content": "You are medical Assistant that can generate medical reports based on the given patient's medical data."},
-            {"role": "user", "content": user_message}
-        ] , temperature=0.3,top_p=1 
-    )
-    return jsonify(response['choices'][0]['message'])
+@app.route('/retrieve', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def retrieve_from_mongodb(*args, **kwargs):
+    data = request.json
+    #unique_code = data['item']['id']
+    #aad_user = data['item']['user']
+    unique_code = data['id']
+    aad_user = data['user']
+    
+    if not unique_code:
+        return jsonify({"error": "Unique code is required"}), 400
+    if not aad_user:
+        return jsonify({"error": "User is required"}), 400
+    
+ # Calculate the timestamp for 30 days ago
+    #thirty_days_ago_timestamp = int(time.time()) - 30 * 24 * 60 * 60    
+    
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+ 
+        # Construct the query
+        query = {
+            "patientID": unique_code,
+            "user": aad_user,
+        }
+ 
+        # Execute the query
+        items = list(collection.find(query))        
 
-@app.route('/compare', methods=['POST'])
-def get_comparision_response():
-    user_message = request.json.get('prompt')
-    response = openai.ChatCompletion.create(
-        # The deployment name you chose when you deployed the GPT-35-Turbo or GPT-4 model.
-        engine="432",
-        messages=[
-            {"role": "system",
-                "content": "Extract the list of entities and their values from the provided Source Data and Medical Report in tabular format with 3 columns named as Entity ,Source Data value, Medical Report Value .\n\nAn Entity is:\n- Relevant: to the main story.\n- Specific: descriptive yet concise (5 words or fewer).\n- Faithful: present in the provided data.\n- Anywhere: Located anywhere in provided data."},
-            {"role": "user", "content": user_message}
-        ] , temperature=0.3,top_p=1 
-    )
-    return jsonify(response['choices'][0]['message'])
+        for item in items:
+            item['_id'] = str(item['_id'])
+ 
+        if items:
+            return jsonify(items), 200
+        else:
+            return jsonify({"error": "Data not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/getPatientList', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def get_patient_list_from_mongodb(*args, **kwargs):
+    data = request.json
+    #aad_user = data['item']['user']
+    aad_user = data['user']
+ 
+    if not aad_user:
+        return jsonify({"error": "User is required"}), 400
+ 
+    # Calculate the timestamp for 30 days ago
+    #thirty_days_ago_timestamp = int(time.time()) - 30 * 24 * 60 * 60
+ 
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+ 
+        # Construct the query
+        query = {
+            "user": aad_user,
+            # "_ts": {"$gte": thirty_days_ago_timestamp}
+        }
+ 
+        # Execute the query
+        items = list(collection.find(query))
+ 
+        # Convert ObjectId to string for JSON serialization
+        for item in items:
+            item['_id'] = str(item['_id'])
+ 
+        if items:
+            return jsonify(items), 200
+        else:
+            # return jsonify({"error": "Data not found"}), 404
+            # JH
+            return jsonify([]), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/retrieveAll', methods=['GET'])
+# @validate_hmac
+# @validate_client_cert
+def retrieve_all_from_mongodb(*args, **kwargs):
+    
+   
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+ 
 
-@app.route('/format_transcript', methods=['POST'])
-def get_format_transcript():
-    user_message = request.json.get('transcript')
-    response = openai.ChatCompletion.create(
-        # The deployment name you chose when you deployed the GPT-35-Turbo or GPT-4 model.
-        engine="432",
-        messages=[
-            {"role": "system",
-                "content": "You will be provided with a transcript of a conversation between a doctor and a patient. You need to format the transcript in a way that it is easy to read and understand. You can use any format provided in Sample Transcript below. Do not add any additional information to the transcript. \n\nSample Transcript:\nDoctor: Hello, how are you?\nPatient: I am fine, thank you.\nDoctor: What brings you here today?\nPatient: I have a headache.\nDoctor: How long have you had it?\nPatient: For about a week."},
-            {"role": "assistant", "content": user_message}
-        ] , temperature=0.2,top_p=1 
-    )
-    return jsonify(response['choices'][0]['message'])
+ 
+        # Execute the query
+        # Execute the query to get all documents, but only return the user and transcript fields
+        items = list(collection.find())
 
-@app.route('/summarize_transript', methods=['POST'])
-def get_summarize_transcript():
-    user_message = request.json.get('transcript')
-    response = openai.ChatCompletion.create(
-        # The deployment name you chose when you deployed the GPT-35-Turbo or GPT-4 model.
-        engine="432",
-        messages=[
-            {"role": "system",
-                "content": "You will be provided with a transcript of a conversation between a doctor and a patient. You need to summarize the transcript in a way that it is easy to read and understand. Summary show be 3-10 sentences long depending on the length of the transcript. Summary should include Problem, Medical history, Medications, Allergies, Family history, Social history, Physical exam, Assessment, Plan. \n\nSample Summary: \nProblem: \nPatient has a headache for about a week. \n\nMedical history: \nPatient has no medical history. \n\nMedication:\n Patient is not taking any medications. \n\nAllergies:\n Patient has no allergies. Patient has no family history. \n\nFamily history:\n Patient has no social history. \n\nPhysical examination:\n Patient has no physical exam. \n\nAssessment:\n Patient has no assessment. \n\nPlan:\n Patient has no plan."},
-            {"role": "assistant", "content": user_message}
-        ] , temperature=0.2,top_p=1 
-    )
-    return jsonify(response['choices'][0]['message'])
+        for item in items:
+            item['_id'] = str(item['_id'])
+
+        if items:
+            return jsonify(items), 200
+        else:
+            return jsonify({"error": "Data not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+#Insert Route
+@app.route('/insertInstitutions', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def insert_institutions(*args, **kwargs):
+    institutions = [ 'SGH','CGH', 'KKH','SKH',  'NCCS',  'NDCS',  'NHCS',  'NNI', 'POLY',   'SCH',  'SERI', 'SHP', 'SNEC','ADMIN','ALLIED HEALTH' ,'SHHQ', 'ALL', 'OTHERS']
+
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_institutions"]
+
+        # Delete
+        collection.delete_many({})
+
+        # Insert institutions
+        for institution in institutions:
+            collection.insert_one({
+                "id": str(uuid.uuid4()),  # Generate a unique ID
+                "inst": institution
+            })
+
+        return jsonify({
+            "title": "Institutions inserted",
+            "description": "Static institutions inserted successfully",
+            "status": "success"
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/insertDepts', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def insert_Depts(*args, **kwargs):
+    institutions = ['Admin','Allied Health','Nursing','Anaesthesiology',	'Breast Surgery',	'Colorectal Surgery',	'Dermatology',	'Radiology',	'Emergency Med',	'Endocrinology',	'Family Med',	'Gastroenterology',	'General Surgery',	'Geriatric Med',	'Gynaecology',	'Haematology',	'Hand Surgery',	'Head & Neck',	'Health Screening',	'HPB',	'Infectious Diseases',	'Internal Med',	'Lung Centre',	'Neonatology',	'Neurology',	'Neurosurgery',	'Nuclear Med',	'Occupational Med',	'Orthopaedic Surgery',	'Otorhinolaryngology',	'Pain Management Ctr','Pediatrics',	'Plastic Surgery',	'Psychiatry',	'Rehab Med',	'Renal Med',	'Respiratory Med',	'Rheumatology',	'Sleep Disorders',	'SPRinT',	'Staff Clinic',	'Upper GI Surgery',	'Urology',	'Vascular Surgery',	'MICU',	'NEMICU',	'BICU',	'Obstetrics',	'Burns',	'Ophthalmology',	'Otolaryngology',	'Oncology',	'Newborn Nursery',	'Occupational Therapy',	'General','Others']
+
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_departments"]
+
+        # Delete
+        collection.delete_many({})
+
+        # Insert institutions
+        for institution in institutions:
+            collection.insert_one({
+                "id": str(uuid.uuid4()),  # Generate a unique ID
+                "dept": institution
+            })
+
+        return jsonify({
+            "title": "Departments inserted",
+            "description": "Static departments inserted successfully",
+            "status": "success"
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500 
+
+#Feedback Route
+@app.route('/updateFeedback', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+#01082024 -Updated to include feedback fields
+def update_feedback_in_mongodb(*args, **kwargs):
+    data = request.json['item']
+    document_id = data['id']
+    accuracy = data['accuracy']
+    completeness = data['completeness']
+    coherence = data['coherence']
+    lexiconPrecision = data['lexiconPrecision']
+    feedback = data['feedback']
+    
+    if not document_id or (not accuracy and not completeness and not coherence and not lexiconPrecision):
+        return jsonify({"error": "No data or updated Feedback to save."}), 400
+
+    try:
+        # Update the summary field in the document
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+        result = collection.update_one({"id": document_id}, {"$set": {**data,"accuracy": accuracy , "completeness": completeness, "coherence": coherence, "lexiconPrecision": lexiconPrecision, "feedback": feedback}})
+        
+        #return updated document if modified
+        if result.modified_count > 0:
+            document = collection.find_one({"id": document_id})
+            response = {
+                "accuracy": document["accuracy"],
+                "completeness": document["completeness"],
+                "coherence": document["coherence"],
+                "lexiconPrecision": document["lexiconPrecision"],
+                "feedback": document["feedback"],
+                "id": document["id"],
+                "code": document["code"],
+            }
+            return jsonify(response)
+            # return jsonify({"success": True, "message": "Feedback updated successfully in MongoDB."})
+        else:
+            return jsonify({"error": "Document not found or Feedback not updated."}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+#Delete Route 
+@app.route('/deleteNotebuddyPrompt', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def delete_notebuddy_prompt(*args, **kwargs):
+    data = request.json['item']
+    prompt_id = data['promptId']
+ 
+    if not prompt_id:
+        return jsonify({"error": "Prompt ID is required"}), 400
+ 
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_prompts"]
+ 
+        # Search collection for documents with the same prompt ID
+        item_to_delete = collection.find_one({"id": prompt_id})
+ 
+        if not item_to_delete:
+            return jsonify({"error": "Item not found"}), 404
+ 
+        # Delete the item from the database
+        result = collection.delete_one({"id": prompt_id})
+ 
+        if result.deleted_count == 1:
+            return jsonify({
+                "title": "Prompt deleted",
+                "description": f"Prompt with id {prompt_id} deleted successfully",
+                "status": "success"
+            }), 200
+        else:
+            return jsonify({"error": "Prompt not deleted."}), 500
+ 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/deleteAllNotes', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def delete_all_notes(*args, **kwargs):
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_prompts"]
+ 
+        # Delete all documents from the collection
+        result = collection.delete_many({})
+ 
+        if result.deleted_count > 0:
+            return jsonify({
+                "title": "All Prompts Deleted",
+                "description": f"{result.deleted_count} prompts deleted successfully",
+                "status": "success"
+            }), 200
+        else:
+            return jsonify({
+                "title": "No Prompts Found",
+                "description": "No prompts were found to delete.",
+                "status": "success"
+            }), 200
+ 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+#UpdateSummary Route 
+@app.route('/updateSummary', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def update_summary_in_mongodb(*args, **kwargs):
+    data = request.json['item']
+    document_code = data['code']
+    document_id = data['id']
+    summary = data['updatedSummary']
+
+    
+    if not document_id or not summary:
+        return jsonify({"error": "No data or updated summary to save."}), 400
+    
+    # Decode
+    decoded_updatedsummary = base64.b64decode(data['updatedSummary']).decode('utf-8')
+
+    try:
+        # Update the summary field in the document
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+        result = collection.update_one({"id": document_id}, {"$set": {**data,"code": document_code,"updatedSummary": decoded_updatedsummary , "_ts": int(time.time())}})
+
+        
+        #return updated document if modified
+        if result.modified_count > 0:
+            document = collection.find_one({"id": document_id})
+            response = {
+                "UpdatedSummary": decoded_updatedsummary,  #29072024 - Updated to return updated summary
+                "transcript": document["transcript"],
+                "id": document["code"]
+            }
+            return jsonify(response)
+            # return jsonify({"success": True, "message": "Summary updated successfully in MongoDB."})
+        else:
+            return jsonify({"error": "Document not found or summary not updated."}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/regenerateSummary', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def regenerate_summary_in_mongodb(*args, **kwargs):
+    data = request.json
+    document_id = data['item']['id']
+    document_code = data['item']['code']
+    updated_summary = data['item']['updatedSummary']
+    summary = data['item']['summary']
+    
+    if not document_id or not summary:
+        return jsonify({"error": "No data or updated summary to save."}), 400
+
+    # Decode
+    decoded_updatedsummary = base64.b64decode(data['item']['updatedSummary']).decode('utf-8')
+    decoded_summary = base64.b64decode(data['item']['summary']).decode('utf-8')
+
+    try:
+        # Update the summary field in the document
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+        result = collection.update_one({"id": document_id}, {"$set": {**data,"code":document_code, "updatedSummary": decoded_updatedsummary, "summary": decoded_summary}})
+        
+        #return updated document if modified
+        if result.modified_count > 0:
+            document = collection.find_one({"id": document_id})
+            response = {
+                "summary": document["summary"],
+                "updatedSummary": document["updatedSummary"],
+                "transcript": document["transcript"],
+                "id": document["code"]
+            }
+            return jsonify(response)
+            # return jsonify({"success": True, "message": "Summary updated successfully in MongoDB."})
+        else:
+            return jsonify({"error": "Document not found or summary not updated."}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/updateNotebuddyPrompt', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def update_notebuddy_prompt(*args, **kwargs):
+    data = request.json['item']
+
+    # Decode
+    decoded_prompttitle = base64.b64decode(data['promptTitle']).decode('utf-8')
+    decoded_prompt = base64.b64decode(data['prompt']).decode('utf-8')
+
+    # Update the decoded prompt into data
+    data['promptTitle'] = decoded_prompttitle
+    data['prompt'] = decoded_prompt
+
+    try:
+        filter = {'id': data['id']}
+        update = {
+            '$set': {
+                **data,
+                '_ts': int(time.time())  # Add current timestamp
+            }
+        }
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_prompts"]
+
+        #search collection for documents with same prompt title
+        documents = list(collection.find({"promptTitle": decoded_prompttitle}))
+
+        #if no docs found
+        if documents and len(documents) == 0:
+            return jsonify({"error": "Prompt not found."}), 404
+
+        #if more than 1 doc, immediately fail
+        if documents and len(documents) != 1:
+            return jsonify({"error": "Prompt with same title already exists."}), 400
+
+        doc = documents[0]
+        print(doc)
+        print(data)
+        #if only 1 doc, check if id matches
+        if doc and doc['id'] != data['id']:
+            return jsonify({"error": "Prompt with same title already exists."}), 400
+
+        #only allow update if aad user id "owns" the prompt
+        result = collection.update_one(filter, update, upsert = True)
+
+        if result.modified_count == 1:
+            return jsonify({"success": True, "message": "Prompt updated successfully."})
+        else:
+            return jsonify({"error": "Prompt not updated."}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500  
+
+#Encrypt Route
+@app.route('/encrypt', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def encrypt_tns_text(*args, **kwargs):
+    data = request.json['item']
+    transcript = data['transcript']
+
+    if not transcript:
+        return jsonify({"error": "Transcript is required"}), 400
+
+    try:
+        chunks = [transcript[i:i+5000] for i in range(0, len(transcript), 5000)]
+
+        # Process each chunk
+        identified_pii = set()
+        for i in range(len(chunks)):
+            chunk = chunks[i]
+
+            # Use Azure Text Analytics to identify names and email addresses
+            response = text_analytics_client.recognize_pii_entities(documents=[chunk], categories_filter=["Email", "PhoneNumber", "SGNationalRegistrationIdentityCardNumber", "Address"])
+
+            # Go through the recognized entities
+            for entity in response[0].entities:
+                if entity.category in ["Email", "PhoneNumber", "SGNationalRegistrationIdentityCardNumber", "Address"]:
+                    # Add the identified PII to the set
+                    identified_pii.add(entity.text)
+
+        # Replace all unique PII values with their masked counterparts
+        for pii in identified_pii:
+            transcript = transcript.replace(pii, "XXXX")
+
+        return jsonify({"encrypted_transcript": transcript, "identified_pii": list(identified_pii)}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+         
 
 # Run Server
 if __name__ == '__main__':
