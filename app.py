@@ -10,9 +10,9 @@ import uuid
 import os
 from azure.ai.textanalytics import TextAnalyticsClient
 from azure.core.credentials import AzureKeyCredential
-from promptflow.core import AzureOpenAIModelConfiguration
-from promptflow.client import load_flow
-from promptflow.evals.evaluators import RelevanceEvaluator, GroundednessEvaluator, CoherenceEvaluator
+#from promptflow.core import AzureOpenAIModelConfiguration
+#from promptflow.client import load_flow
+#from promptflow.evals.evaluators import RelevanceEvaluator, GroundednessEvaluator, CoherenceEvaluator
 import pymongo
 import pytz
 import time

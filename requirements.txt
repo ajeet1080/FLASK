@@ -6,6 +6,5 @@ cryptography
 azure-cosmos
 azure-ai-textanalytics
 azure-core
-promptflow
 pymongo
 pytz
