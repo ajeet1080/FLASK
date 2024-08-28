@@ -563,8 +563,9 @@ def update_feedback_in_mongodb(*args, **kwargs):
 # @validate_hmac
 # @validate_client_cert
 def delete_notebuddy_prompt(*args, **kwargs):
-    data = request.json['item']
-    prompt_id = data['promptId']
+    prompt_id = request.json['promptId']
+    #data = request['item']
+    #prompt_id = data['promptId']
  
     if not prompt_id:
         return jsonify({"error": "Prompt ID is required"}), 400
