@@ -184,6 +184,9 @@ def save_notebuddy_prompt(*args, **kwargs):
     # Decode
     decoded_prompttitle = base64.b64decode(item['promptTitle']).decode('utf-8')
     decoded_prompt = base64.b64decode(item['prompt']).decode('utf-8')
+    decoded_promptCategory = base64.b64decode(item['promptCategory']).decode('utf-8') # Added 28082024
+    decoded_promptVisibility = base64.b64decode(item['promptVisibility']).decode('utf-8') # Added 28082024
+
     
     #check if there is a prompt in db with same title
     try:
@@ -230,6 +233,8 @@ def save_notebuddy_prompt(*args, **kwargs):
             "user": item['user'],
             "prompt": decoded_prompt,
             "promptTitle": decoded_prompttitle,
+            "promptCategory": decoded_promptCategory, # Added 28082024
+            "promptVisibility": decoded_promptVisibility, # Added 28082024
             "_ts": int(time.time())
         }
         db_name = "notebuddy-db"
