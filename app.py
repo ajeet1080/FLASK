@@ -186,8 +186,7 @@ def save_notebuddy_prompt(*args, **kwargs):
     decoded_prompt = base64.b64decode(item['prompt']).decode('utf-8')
     decoded_promptCategory = base64.b64decode(item['promptCategory']).decode('utf-8') # Added 28082024
     decoded_promptVisibility = base64.b64decode(item['promptVisibility']).decode('utf-8') # Added 28082024
-
-    
+        
     #check if there is a prompt in db with same title
     try:
         db_name = "notebuddy-db"
@@ -235,6 +234,7 @@ def save_notebuddy_prompt(*args, **kwargs):
             "promptTitle": decoded_prompttitle,
             "promptCategory": decoded_promptCategory, # Added 28082024
             "promptVisibility": decoded_promptVisibility, # Added 28082024
+          
             "_ts": int(time.time())
         }
         db_name = "notebuddy-db"
@@ -708,21 +708,26 @@ def regenerate_summary_in_mongodb(*args, **kwargs):
 # @validate_hmac
 # @validate_client_cert
 def update_notebuddy_prompt(*args, **kwargs):
-    data = request.json['item']
+    data = request.json["item"]
+   
 
     # Decode
     decoded_prompttitle = base64.b64decode(data['promptTitle']).decode('utf-8')
     decoded_prompt = base64.b64decode(data['prompt']).decode('utf-8')
+    decoded_promptVisibility = data['promptVisibility']
 
     # Update the decoded prompt into data
     data['promptTitle'] = decoded_prompttitle
     data['prompt'] = decoded_prompt
+    data['promptVisibility'] = decoded_promptVisibility
 
     try:
         filter = {'id': data['id']}
         update = {
             '$set': {
                 **data,
+                'prompt': decoded_prompt,
+                'promptVisibility': decoded_promptVisibility,
                 '_ts': int(time.time())  # Add current timestamp
             }
         }
