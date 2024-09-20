@@ -18,8 +18,6 @@ import pytz
 import time
 from datetime import datetime, timedelta
 import base64
-
-
 import os
 
 # test
@@ -812,26 +810,26 @@ def manage_data():
         collection = db["notebuddy"]
         archive_collection = db["notebuddy_archive"]
 
-        # Create a TTL index on the '_ts' field with a 30-day expiration
-        collection.create_index([("_ts", 1)], expireAfterSeconds=30*24*60*60)
-
         # Move data to another collection before it expires
         expiration_threshold = datetime.utcnow() - timedelta(days=30)
-        documents_to_archive = list(collection.find({"_ts": {"$lt": expiration_threshold}}))
+        documents_to_archive = list(collection.find({"_ts": {"$lt": int(expiration_threshold.timestamp())}}))
+
+        archived_count = 0  # Counter for archived documents
 
         if documents_to_archive:  # Check if the list is not empty
             for doc in documents_to_archive:
                 try:
                     archive_collection.insert_one(doc)
                     collection.delete_one({"id": doc["id"]})
+                    archived_count += 1  # Increment the counter
                 except pymongo.errors.DuplicateKeyError:
                     # Skip the document if it causes a duplicate key error
                     continue
 
-        return jsonify({"message": "Data archived successfully"}), 200
+        return jsonify({"message": f"{archived_count} documents archived successfully"}), 200
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500 
+        return jsonify({"error": str(e)}), 500  
 
 @app.route('/manageArchive', methods=['POST'])
 def manage_archive():
@@ -842,19 +840,17 @@ def manage_archive():
 
         # Get expiration threshold from request body
         data = request.get_json()
-        expiration_days = data.get('expiration_days', 30)  # Default to 30 days if not provided
-
-        # Create a TTL index on the '_ts' field with the specified expiration
-        archive_collection.create_index([("_ts", 1)], expireAfterSeconds=expiration_days*24*60*60)
+        expiration_days = data.get('expiration_days', 60)  # Default to 30 days if not provided
 
         # Delete documents older than the specified expiration threshold
         expiration_threshold = datetime.utcnow() - timedelta(days=expiration_days)
-        result = archive_collection.delete_many({"_ts": {"$lt": expiration_threshold}})
+        result = archive_collection.delete_many({"_ts": {"$lt": int(expiration_threshold.timestamp())}})
 
         return jsonify({"message": f"{result.deleted_count} documents deleted successfully"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # Run Server
 if __name__ == '__main__':
