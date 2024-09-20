@@ -823,7 +823,7 @@ def manage_data():
             for doc in documents_to_archive:
                 try:
                     archive_collection.insert_one(doc)
-                    collection.delete_one({"_id": doc["_id"]})
+                    collection.delete_one({"id": doc["id"]})
                 except pymongo.errors.DuplicateKeyError:
                     # Skip the document if it causes a duplicate key error
                     continue
