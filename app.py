@@ -816,7 +816,7 @@ def manage_data():
         collection.create_index([("_ts", 1)], expireAfterSeconds=30*24*60*60)
 
         # Move data to another collection before it expires
-        expiration_threshold = datetime.utcnow() - timedelta(days=29)
+        expiration_threshold = datetime.utcnow() - timedelta(days=30)
         documents_to_archive = list(collection.find({"_ts": {"$lt": expiration_threshold}}))
 
         if documents_to_archive:  # Check if the list is not empty
