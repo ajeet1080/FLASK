@@ -851,6 +851,13 @@ def manage_archive():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/nonce', methods=['POST'])
+def generate_nonce():
+    """Generate a random nonce."""
+    #return secrets.token_urlsafe(32)
+    nonce = uuid.uuid4().hex
+    return jsonify({'nonce': nonce})
+
 
 # Run Server
 if __name__ == '__main__':
