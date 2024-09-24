@@ -1,3 +1,4 @@
+import datetime
 from flask import Flask, request, jsonify, send_from_directory
 # from flask_marshmallow import Marshmallow
 from flask_swagger_ui import get_swaggerui_blueprint
@@ -13,6 +14,7 @@ from azure.core.credentials import AzureKeyCredential
 #from promptflow.core import AzureOpenAIModelConfiguration
 #from promptflow.client import load_flow
 #from promptflow.evals.evaluators import RelevanceEvaluator, GroundednessEvaluator, CoherenceEvaluator
+from apscheduler.schedulers.background import BackgroundScheduler
 import pymongo
 import pytz
 import time
@@ -799,8 +801,118 @@ def encrypt_tns_text(*args, **kwargs):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+@app.route('/updateAllPrompts', methods=['POST'])
+def update_all_prompts():
+    try:
+        # Fetch all documents from the collection
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_prompts"]
+        documents = collection.find()
+
+        if not documents:
+            return jsonify({"message": "No documents found."}), 404
+
+        updated_count = 0
+
+        # Loop through each document
+        for doc in documents:
+            if 'PromptCategory' in doc and 'PromptVisibility' in doc:
+                continue
+            # Update fields
+            else:
+                filter = {'_id': doc['_id']}
+                update = {
+                    '$set': {
+                        'PromptCategory': 'Patient Consultation',  # Set PromptCategory to Consultation
+                        'PromptVisibility': '1',  # Ensure PromptVisibility is present
+                        
+                    }
+                }
+
+                # Update the document in the collection
+                result = collection.update_one(filter, update)
+
+                # Track how many documents were updated
+                if result.modified_count == 1:
+                    updated_count += 1
+
+        return jsonify({"success": True, "updated_count": updated_count, "message": "Documents updated successfully."})
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500   
+
+@app.route('/manageData', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def manage_data():
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+        archive_collection = db["notebuddy_archive"]
+
+        # Move data to another collection before it expires
+        expiration_threshold = datetime.utcnow() - datetime.timedelta(days=30)
+        documents_to_archive = list(collection.find({"_ts": {"$lt": int(expiration_threshold.timestamp())}}))
+
+        archived_count = 0  # Counter for archived documents
+
+        if documents_to_archive:  # Check if the list is not empty
+            for doc in documents_to_archive:
+                try:
+                    archive_collection.insert_one(doc)
+                    collection.delete_one({"id": doc["id"]})
+                    archived_count += 1  # Increment the counter
+                except pymongo.errors.DuplicateKeyError:
+                    # Skip the document if it causes a duplicate key error
+                    continue
+
+        return jsonify({"message": f"{archived_count} documents archived successfully"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500  
+
+@app.route('/manageArchive', methods=['POST'])
+def manage_archive():
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        archive_collection = db["notebuddy_archive"]
+
+        # Get expiration threshold from request body
+        data = request.get_json()
+        expiration_days = data.get('expiration_days', 60)  # Default to 30 days if not provided
+
+        # Delete documents older than the specified expiration threshold
+        expiration_threshold = datetime.utcnow() - datetime.timedelta(days=expiration_days)
+        result = archive_collection.delete_many({"_ts": {"$lt": int(expiration_threshold.timestamp())}})
+
+        return jsonify({"message": f"{result.deleted_count} documents deleted successfully"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500     
+    
+@app.route('/nonce', methods=['POST'])
+def generate_nonce():
+    """Generate a random nonce."""
+    #return secrets.token_urlsafe(32)
+    nonce = uuid.uuid4().hex
+    return jsonify({'nonce': nonce})    
+
+def schedule_manage_data():
+    with app.app_context():
+        manage_data()
          
 
 # Run Server
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=8000)
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(schedule_manage_data, 'cron', hour=10, minute=15)  # Schedule to run every day at 8 PM
+    scheduler.start()
+    
+    try:
+        app.run(host="0.0.0.0", port=8000)
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
