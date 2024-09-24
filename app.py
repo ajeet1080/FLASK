@@ -909,7 +909,7 @@ def schedule_manage_data():
 # Run Server
 if __name__ == '__main__':
     scheduler = BackgroundScheduler()
-    scheduler.add_job(schedule_manage_data, 'cron', hour=10, minute=15)  # Schedule to run every day at 8 PM
+    scheduler.add_job(schedule_manage_data, 'cron', hour=14, minute=30)  # Schedule to run every day at 8 PM
     scheduler.start()
     
     try:
