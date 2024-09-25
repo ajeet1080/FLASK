@@ -1,4 +1,4 @@
-import datetime
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, send_from_directory
 # from flask_marshmallow import Marshmallow
 from flask_swagger_ui import get_swaggerui_blueprint
@@ -854,7 +854,7 @@ def manage_data():
         archive_collection = db["notebuddy_archive"]
 
         # Move data to another collection before it expires
-        expiration_threshold = datetime.utcnow() - datetime.timedelta(days=30)
+        expiration_threshold = datetime.now(timezone.utc) - timedelta(days=30)
         documents_to_archive = list(collection.find({"_ts": {"$lt": int(expiration_threshold.timestamp())}}))
 
         archived_count = 0  # Counter for archived documents
@@ -886,7 +886,7 @@ def manage_archive():
         expiration_days = data.get('expiration_days', 60)  # Default to 30 days if not provided
 
         # Delete documents older than the specified expiration threshold
-        expiration_threshold = datetime.utcnow() - datetime.timedelta(days=expiration_days)
+        expiration_threshold = datetime.now(timezone.utc) - timedelta(days=expiration_days)
         result = archive_collection.delete_many({"_ts": {"$lt": int(expiration_threshold.timestamp())}})
 
         return jsonify({"message": f"{result.deleted_count} documents deleted successfully"}), 200
@@ -894,25 +894,41 @@ def manage_archive():
     except Exception as e:
         return jsonify({"error": str(e)}), 500     
     
-@app.route('/nonce', methods=['POST'])
+@app.route('/nonce', methods=['GET'])
 def generate_nonce():
     """Generate a random nonce."""
     #return secrets.token_urlsafe(32)
     nonce = uuid.uuid4().hex
     return jsonify({'nonce': nonce})    
 
-def schedule_manage_data():
-    with app.app_context():
-        manage_data()
-         
+@app.route('/retrieveAll_hist', methods=['GET'])
+# @validate_hmac
+# @validate_client_cert
+def retrieve_all_from_mongodb_hist(*args, **kwargs):
+    
+   
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy_archive"]
+ 
+
+ 
+        # Execute the query
+        # Execute the query to get all documents, but only return the user and transcript fields
+        items = list(collection.find())
+
+        for item in items:
+            item['_id'] = str(item['_id'])
+
+        if items:
+            return jsonify(items), 200
+        else:
+            return jsonify({"error": "Data not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500        
 
 # Run Server
 if __name__ == '__main__':
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(schedule_manage_data, 'cron', hour=14, minute=30)  # Schedule to run every day at 8 PM
-    scheduler.start()
-    
-    try:
-        app.run(host="0.0.0.0", port=8000)
-    except (KeyboardInterrupt, SystemExit):
-        scheduler.shutdown()
+  app.run(host="0.0.0.0", port=8000)
+
