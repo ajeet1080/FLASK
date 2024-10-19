@@ -146,6 +146,7 @@ def save_to_mongodb(*args, **kwargs):
         document = {
             "id": new_id,
             "user": item['user'],
+            "userName": item['userName'],
             "patientID": item['patientID'],
             "dataCategory": item['dataCategory'],
             "summary": decoded_summary,
@@ -160,6 +161,8 @@ def save_to_mongodb(*args, **kwargs):
             "coherence": "",
             "lexiconPrecision": "",
             "feedback": "",
+            "startTime": item['startTime'],
+            "endTime": item['endTime'],
             "_ts": int(time.time())  # Current Unix timestamp
         }
 
@@ -665,6 +668,49 @@ def update_summary_in_mongodb(*args, **kwargs):
             return jsonify({"error": "Document not found or summary not updated."}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+@app.route('/resetSummary', methods=['POST'])
+# @validate_hmac
+# @validate_client_cert
+def reset_summary_in_mongodb(*args, **kwargs):
+    data = request.json['item']
+    document_code = data['code']
+    document_id = data['id']
+    summary = data['summary']
+    #updatedSummary = data['updatedSummary']
+    #transcript = data['transcript']
+    #formattedtranscript = data['formattedtranscript']
+
+    
+    if not document_id or not summary:
+        return jsonify({"error": "No data or updated summary to save."}), 400
+    
+    # Decode
+    decoded_updatedsummary = "information deleted by user"
+    msg = "information deleted by user"
+
+    try:
+        # Update the summary field in the document
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+        result = collection.update_one({"id": document_id}, {"$set": {**data,"code": document_code,"transcript":msg,"formattedtranscript":msg,"summary": msg,"updatedSummary": msg , "_ts": int(time.time())}})
+
+        
+        #return updated document if modified
+        if result.modified_count > 0:
+            document = collection.find_one({"id": document_id})
+            response = {
+                "UpdatedSummary": decoded_updatedsummary,  #29072024 - Updated to return updated summary
+                "transcript": document["transcript"],
+                "id": document["code"]
+            }
+            return jsonify(response)
+            # return jsonify({"success": True, "message": "Summary updated successfully in MongoDB."})
+        else:
+            return jsonify({"error": "Document not found or summary not updated."}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500    
 
 @app.route('/regenerateSummary', methods=['POST'])
 # @validate_hmac
@@ -851,10 +897,10 @@ def manage_data():
         db_name = "notebuddy-db"
         db = client[db_name]
         collection = db["notebuddy"]
-        archive_collection = db["notebuddy_archive"]
+        archive_collection = db["notebuddy_hist"]
 
         # Move data to another collection before it expires
-        expiration_threshold = datetime.now(timezone.utc) - timedelta(days=30)
+        expiration_threshold = datetime.now(timezone.utc) - timedelta(days=35)
         documents_to_archive = list(collection.find({"_ts": {"$lt": int(expiration_threshold.timestamp())}}))
 
         archived_count = 0  # Counter for archived documents
@@ -869,7 +915,7 @@ def manage_data():
                     # Skip the document if it causes a duplicate key error
                     continue
 
-        return jsonify({"message": f"{archived_count} documents archived successfully"}), 200
+        return jsonify({"message": f"{archived_count} documents archived successfully. Threshold: {expiration_threshold} -  {int(expiration_threshold.timestamp())}"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500  
@@ -879,7 +925,7 @@ def manage_archive():
     try:
         db_name = "notebuddy-db"
         db = client[db_name]
-        archive_collection = db["notebuddy_archive"]
+        archive_collection = db["notebuddy_hist"]
 
         # Get expiration threshold from request body
         data = request.get_json()
@@ -910,7 +956,7 @@ def retrieve_all_from_mongodb_hist(*args, **kwargs):
     try:
         db_name = "notebuddy-db"
         db = client[db_name]
-        collection = db["notebuddy_archive"]
+        collection = db["notebuddy_hist"]
  
 
  
@@ -926,7 +972,69 @@ def retrieve_all_from_mongodb_hist(*args, **kwargs):
         else:
             return jsonify({"error": "Data not found"}), 404
     except Exception as e:
-        return jsonify({"error": str(e)}), 500        
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/latestPrompt', methods=['POST'])
+def get_latest_prompt():
+    data = request.json
+    user_name = data.get('item', {}).get('userName')
+
+    if not user_name:
+        return jsonify({"error": "userName is required"}), 400
+
+    try:
+        db_name = "notebuddy-db"
+        db = client[db_name]
+        collection = db["notebuddy"]
+
+        # Find the latest document for the given userName
+        latest_document = collection.find_one(
+            {"user": user_name},
+            sort=[("_ts", -1)]
+        )
+
+        if not latest_document:
+            return jsonify({"error": "No records found for the given userName"}), 404
+
+        prompt_title = latest_document.get("promptTitle")
+        
+
+        # Modify the promptTitle to match the format in notebuddy_prompts
+        modified_prompt_title_1 = prompt_title.split('-', 7)[0]
+        modified_prompt_title_2 = prompt_title.split('-', 7)[1]
+        modified_prompt_title_3= prompt_title.split('---', 1)[-1]
+        modified_prompt_title = f"{modified_prompt_title_1}-{modified_prompt_title_2}---{modified_prompt_title_3}"
+
+        # Find the corresponding id from notebuddy_prompts collection
+        prompts_collection = db["notebuddy_prompts"]
+        prompt_document = prompts_collection.find_one(
+            {"promptTitle": prompt_title}
+        )
+
+        if not prompt_document:
+            prompt_document01 = prompts_collection.find_one(
+                {"promptTitle": modified_prompt_title}
+            )
+            if not prompt_document01:
+               return jsonify({"error": f"No matching prompt found in notebuddy_prompts for {modified_prompt_title}"}), 404
+            else :
+                response = {
+                    "promptTitle": prompt_document01.get("promptTitle"),
+                    "promptCategory": prompt_document01.get("promptCategory"),
+                    "id": prompt_document01.get("id")
+                }
+                return jsonify(response)         
+
+        response = {
+            "promptTitle": prompt_document.get("promptTitle"),
+            "promptCategory": prompt_document.get("promptCategory"),
+            "id": prompt_document.get("id")
+        }
+
+        return jsonify(response)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500            
 
 # Run Server
 if __name__ == '__main__':
